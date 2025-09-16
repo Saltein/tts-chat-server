@@ -89,11 +89,11 @@ def cleanup_worker():
                     except Exception as e:
                         logging.error(f"Ошибка удаления файла {file_path}: {e}")
                         files_to_delete.remove((file_path, delete_time))
-            
+
             # Удаляем старые файлы каждые 5 минут
             if current_time % 300 < 1:
                 cleanup_old_files()
-                
+
             time.sleep(1)
         except Exception as e:
             logging.error(f"Ошибка в cleanup_worker: {e}")
@@ -120,12 +120,12 @@ def text_to_speech(text, speaker=None):
             speaker=speaker,
             sample_rate=sample_rate
         )
-        
+
         # Сохраняем аудио
         sf.write(filename, audio, sample_rate)
         logging.info(f"Аудио сгенерировано: {filename}")
         return filename
-        
+
     except Exception as e:
         logging.error(f"Ошибка генерации речи: {e}")
         # Удаляем файл, если он был создан с ошибкой
@@ -145,34 +145,34 @@ def speak():
 
     text = data["text"]
     speaker = data.get("speaker", DEFAULT_SPEAKER)
-    
+
     # Проверяем, что указанный голос существует
     if speaker not in speakers:
         logging.warning(f"Запрошенный голос '{speaker}' не найден. Используется голос по умолчанию: {DEFAULT_SPEAKER}")
         speaker = DEFAULT_SPEAKER
-    
+
     try:
         filename = text_to_speech(text, speaker)
-        
+
         # Отправляем файл с уникальным именем для предотвращения кэширования
         response = send_file(
-            filename, 
+            filename,
             mimetype="audio/wav",
             as_attachment=True,
             download_name=f"speech_{speaker}_{uuid.uuid4().hex[:8]}.wav"
         )
-        
+
         # Добавляем заголовки для предотвращения кэширования
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         response.headers["Content-Disposition"] = f"attachment; filename=speech_{speaker}_{uuid.uuid4().hex[:8]}.wav"
-        
+
         # Добавляем файл в очередь для удаления
         delete_file_later(filename)
-        
+
         return response
-        
+
     except Exception as e:
         logging.error(f"Ошибка генерации речи: {e}")
         return jsonify({"error": str(e)}), 500
@@ -204,7 +204,7 @@ def manual_cleanup():
 if __name__ == "__main__":
     # Очищаем старые файлы при запуске
     cleanup_old_files()
-    
+
     if model is None:
         logging.error("Не удалось загрузить модель TTS! Сервер не может работать.")
     else:
