@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 app = Flask(__name__)
 CORS(app)
-app.config["DEBUG"] = True
+app.config["DEBUG"] = False
 
 # -----------------------------
 # Настройка и загрузка Silero TTS
@@ -29,7 +29,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 model_path = os.path.join(TEMP_DIR, "model.pt")
 if not os.path.isfile(model_path):
     logging.info("Скачивание модели...")
-    url = "https://models.silero.ai/models/tts/ru/v3_1_ru.pt"
+    # url = "https://models.silero.ai/models/tts/ru/v3_1_ru.pt"
+    url = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
     response = requests.get(url)
     with open(model_path, 'wb') as f:
         f.write(response.content)
@@ -41,16 +42,16 @@ try:
     logging.info("Загрузка модели официальным способом...")
     model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
     model.to(device)
+    print('-------------------------SPEAKERS-------------------------', model.speakers, '----------------------------------------------------------', sep='\n')
     logging.info("Модель успешно загружена")
 except Exception as e:
     logging.error(f"Ошибка загрузки модели: {e}")
 
 # Параметры и доступные голоса
-sample_rate = 24000
+sample_rate = 48000
 # Все доступные голоса в модели
 speakers = [
-    'aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random',
-    'aidar_v2', 'baya_v2', 'kseniya_v2', 'xenia_v2', 'eugene_v2'
+    'aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random'
 ]
 DEFAULT_SPEAKER = 'aidar'
 
@@ -69,8 +70,8 @@ def cleanup_old_files():
         logging.error(f"Ошибка при очистке файлов: {e}")
 
 def delete_file_later(file_path):
-    """Добавляем файл в очередь для удаления через 30 секунд"""
-    files_to_delete.append((file_path, time.time() + 30))
+    """Добавляем файл в очередь для удаления через 15 секунд"""
+    files_to_delete.append((file_path, time.time() + 15))
 
 def cleanup_worker():
     """Фоновая задача для удаления файлов"""
