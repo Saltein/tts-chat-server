@@ -46,7 +46,7 @@ except Exception as e:
     logging.error(f"Ошибка загрузки модели: {e}")
 
 # Параметры и доступные голоса
-sample_rate = 48000
+sample_rate = 24000
 speakers = ['aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random']
 DEFAULT_SPEAKER = 'aidar'
 
@@ -75,6 +75,7 @@ def text_to_speech(text, speaker=None):
         # Освобождаем память
         del audio
         gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
         return buffer
 
