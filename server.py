@@ -136,7 +136,7 @@ def text_to_speech(text, speaker=None):
 # -----------------------------
 # Эндпоинты
 # -----------------------------
-@app.route("/speak", methods=["POST"])
+@app.route("/api/speak", methods=["POST"])
 def speak():
     data = request.get_json()
     if not data or "text" not in data:
@@ -177,7 +177,7 @@ def speak():
         logging.error(f"Ошибка генерации речи: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
 def health():
     status = "ok" if model is not None else "error"
     return jsonify({
@@ -185,11 +185,11 @@ def health():
         "message": "TTS server is running" if model is not None else "Model not loaded"
     })
 
-@app.route("/speakers", methods=["GET"])
+@app.route("/api/speakers", methods=["GET"])
 def get_speakers():
     return jsonify({"speakers": speakers})
 
-@app.route("/cleanup", methods=["POST"])
+@app.route("/api/cleanup", methods=["POST"])
 def manual_cleanup():
     """Ручная очистка временных файлов"""
     try:
