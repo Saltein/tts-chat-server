@@ -3,8 +3,13 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Устанавливаем зависимости
+RUN pip install --no-cache-dir numpy
 RUN pip install --no-cache-dir torch==2.2.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
-RUN pip install --no-cache-dir numpy gunicorn flask flask-cors soundfile requests
+RUN pip install --no-cache-dir gunicorn
+RUN pip install --no-cache-dir flask
+RUN pip install --no-cache-dir flask-cors
+RUN pip install --no-cache-dir soundfile
+RUN pip install --no-cache-dir requests
 
 COPY . .
 
