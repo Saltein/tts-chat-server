@@ -8,6 +8,9 @@ import soundfile as sf
 import requests
 import io
 import gc
+import threading
+from ws_lobby import main as ws_main
+import asyncio
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -143,5 +146,11 @@ if __name__ == "__main__":
     if model is None:
         logging.error("Не удалось загрузить модель TTS! Сервер не может работать.")
     else:
+        # Запускаем WebSocket сервер в отдельном потоке
+        def start_ws_server():
+            asyncio.run(ws_main())
+
+        threading.Thread(target=start_ws_server, daemon=True).start()
+
         logging.info("Запуск Flask-сервера на http://0.0.0.0:5001")
         app.run(host="0.0.0.0", port=5001)

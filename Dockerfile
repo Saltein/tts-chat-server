@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir \
     flask \
     flask-cors \
     soundfile \
-    requests
+    requests \
+    websockets==12.0
 
 # -----------------------------
 # Копируем проект
