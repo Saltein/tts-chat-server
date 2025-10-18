@@ -66,6 +66,33 @@ async def handler(websocket):
         async for message in websocket:
             if room_code not in rooms:
                 break
+            
+                # Если пользователь отправил команду "leave"
+            if message.strip().lower() == "leave":
+                if is_host:
+                    # Удаляем комнату и уведомляем клиентов
+                    if room_code in rooms:
+                        room = rooms.pop(room_code)
+                        for client in room['clients']:
+                            if client.open:
+                                await client.send(json.dumps({
+                                    'type': 'room_closed',
+                                    'message': 'host_left'
+                                }))
+                        logging.info(f"Хост покинул комнату {room_code}, комната удалена")
+                else:
+                    # Клиент просто уходит
+                    if room_code in rooms:
+                        room = rooms[room_code]
+                        room['clients'].discard(websocket)
+                        logging.info(f"Клиент покинул комнату {room_code}")
+                        host_websocket = room['host']
+                        if host_websocket.open:
+                            await host_websocket.send(json.dumps({
+                                'type': 'client_disconnected',
+                                'clients_count': len(room['clients'])
+                            }))
+                break
                 
             # Пытаемся распарсить JSON от хоста
             try:
