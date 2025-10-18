@@ -9,16 +9,18 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # -----------------------------
-# Python-зависимости
+# Обновление pip и установка зависимостей
 # -----------------------------
+RUN pip install --no-cache-dir --upgrade pip
+
 RUN pip install --no-cache-dir \
     torch \
-    gunicorn \
     flask \
     flask-cors \
     soundfile \
     requests \
-    websockets==12.0
+    websockets==12.0 \
+    gunicorn
 
 # -----------------------------
 # Копируем проект
@@ -26,11 +28,18 @@ RUN pip install --no-cache-dir \
 COPY . .
 
 # -----------------------------
-# Порт
+# Создаём временную директорию для TTS
 # -----------------------------
-EXPOSE 5001
+RUN mkdir -p tts_temp
 
 # -----------------------------
-# Запуск Gunicorn
+# Порты
 # -----------------------------
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5001", "--timeout", "120", "--max-requests", "50", "--max-requests-jitter", "10", "server:app"]
+EXPOSE 5001
+EXPOSE 6789
+
+# -----------------------------
+# Запуск сервера
+# -----------------------------
+# Используем python для запуска main скрипта, чтобы одновременно работал Flask и WebSocket
+CMD ["python", "-u", "server.py"]
