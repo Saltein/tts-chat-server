@@ -6,11 +6,12 @@ import os
 import logging
 import soundfile as sf
 import requests
-import io
 import gc
 import threading
-from ws_lobby import main as ws_main
+import time
+import tempfile
 import asyncio
+from ws_lobby import main as ws_main
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -52,39 +53,48 @@ except Exception as e:
 sample_rate = 24000
 speakers = ['aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random']
 DEFAULT_SPEAKER = 'aidar'
+TEMP_FILE_LIFETIME = 5  # секунды, через которые файл будет удаляться
 
 
-def text_to_speech(text, speaker=None):
-    if speaker is None or speaker not in speakers:
+# -----------------------------
+# Функции генерации TTS
+# -----------------------------
+def text_to_speech_file(text, speaker=None):
+    if speaker not in speakers:
         speaker = DEFAULT_SPEAKER
 
-    if model is None:
-        raise Exception("Модель не загружена")
+    # Создаём временный файл
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=TEMP_DIR)
+    temp_file_path = temp_file.name
+    temp_file.close()  # закрываем, чтобы sf.write мог писать
 
     logging.info(f"Генерация речи: '{text[:30]}...' с голосом '{speaker}'")
-
     try:
-        with torch.no_grad():
-            audio = model.apply_tts(
-                text=text,
-                speaker=speaker,
-                sample_rate=sample_rate
-            )
+        audio = model.apply_tts(text=text, speaker=speaker, sample_rate=sample_rate)
+        sf.write(temp_file_path, audio, sample_rate)
 
-        buffer = io.BytesIO()
-        sf.write(buffer, audio, sample_rate, format="WAV")
-        buffer.seek(0)
-
-        # Освобождаем память
+        # очищаем память
         del audio
         gc.collect()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-        return buffer
+        # запускаем таймер удаления файла
+        threading.Thread(target=delete_file_later, args=(temp_file_path, TEMP_FILE_LIFETIME), daemon=True).start()
 
+        return temp_file_path
     except Exception as e:
         logging.error(f"Ошибка генерации речи: {e}")
         raise
+
+
+def delete_file_later(path, delay):
+    time.sleep(delay)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            logging.info(f"Временный файл удалён: {path}")
+    except Exception as e:
+        logging.error(f"Ошибка удаления временного файла {path}: {e}")
 
 
 # -----------------------------
@@ -99,21 +109,21 @@ def speak():
 
     text = data["text"]
     speaker = data.get("speaker", DEFAULT_SPEAKER)
-
     if speaker not in speakers:
         logging.warning(f"Запрошенный голос '{speaker}' не найден. Используется голос по умолчанию: {DEFAULT_SPEAKER}")
         speaker = DEFAULT_SPEAKER
 
     try:
-        buffer = text_to_speech(text, speaker)
+        file_path = text_to_speech_file(text, speaker)
 
         response = send_file(
-            buffer,
+            file_path,
             mimetype="audio/wav",
             as_attachment=True,
             download_name=f"speech_{speaker}_{uuid.uuid4().hex[:8]}.wav"
         )
 
+        # Отключаем кэширование
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
