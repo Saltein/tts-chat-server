@@ -1,2 +1,6 @@
-/tts_temp
-/venv310
+.vscode/
+__pycache__/
+venv310/
+tts_temp/
+dist/
+build/
