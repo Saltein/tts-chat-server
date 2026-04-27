@@ -131,6 +131,32 @@ def send_error_message(error_type: ErrorType, error_message: str, error_details=
     logging.error(f"[{error_type.value}] {error_message}")
 
 # -----------------------------
+# Пути к файлам (исправлено для production)
+# -----------------------------
+def get_base_dir():
+    """Возвращает базовую директорию для ресурсов (модели)"""
+    if getattr(sys, 'frozen', False):
+        # Запущено как exe – ресурсы лежат в _MEIPASS
+        return sys._MEIPASS
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+# Папка для модели (только чтение)
+MODEL_DIR = get_base_dir()
+MODEL_PATH = os.path.join(MODEL_DIR, "model5.pt")
+
+# Папка для временных файлов (системная temp папка)
+TEMP_BASE = tempfile.gettempdir()
+APP_TEMP_DIR = os.path.join(TEMP_BASE, "tts_electron")
+SOUNDS_DIR = os.path.join(APP_TEMP_DIR, "sounds")
+
+# Создаём директории для временных файлов
+os.makedirs(SOUNDS_DIR, exist_ok=True)
+
+logging.info(f"Model path: {MODEL_PATH}")
+logging.info(f"Temporary sounds directory: {SOUNDS_DIR}")
+
+# -----------------------------
 # Альтернативный метод загрузки Silero TTS
 # -----------------------------
 def load_silero_model_alternative():
@@ -158,16 +184,11 @@ logging.info("Загрузка модели Silero TTS...")
 send_status_message("tts-start", "loading", {"message": "TTS model loading started"})
 
 device = torch.device("cpu")
-TEMP_DIR = "tts_temp"
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-# Скачиваем модель, если её нет
-model_path = os.path.join(TEMP_DIR, "model5.pt")
 model = None
 sample_rate = 24000
 speakers = ['aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random']
 DEFAULT_SPEAKER = 'aidar'
-TEMP_FILE_LIFETIME = 5
+TEMP_FILE_LIFETIME = 60  # Увеличил до 60 секунд
 
 def get_random_speaker():
     """Возвращает случайный голос из доступных"""
@@ -176,21 +197,28 @@ def get_random_speaker():
 
 # Пытаемся загрузить модель
 try:
-    if not os.path.isfile(model_path):
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        logging.info("Скачивание модели...")
+    # Проверяем наличие модели
+    if not os.path.isfile(MODEL_PATH):
+        logging.warning(f"Model not found at {MODEL_PATH}, attempting to download...")
         send_status_message("tts-download", "downloading", {"message": "Downloading TTS model"})
         
         try:
             url = "https://models.silero.ai/models/tts/ru/v5_ru.pt"
             response = requests.get(url, timeout=30)
             response.raise_for_status()
-            with open(model_path, 'wb') as f:
-                f.write(response.content)
-            logging.info("Модель скачана")
-            send_status_message("tts-download", "success", {"message": "TTS model downloaded successfully"})
+            
+            # В production модель скачать не сможем (read-only), но попробуем
+            # Если не получится, выбросим ошибку
+            try:
+                with open(MODEL_PATH, 'wb') as f:
+                    f.write(response.content)
+                logging.info("Model downloaded successfully")
+                send_status_message("tts-download", "success", {"message": "TTS model downloaded successfully"})
+            except (PermissionError, OSError):
+                error_msg = f"Cannot write model to {MODEL_PATH} (read-only filesystem)"
+                logging.error(error_msg)
+                raise StartupError(error_msg)
+                
         except requests.exceptions.RequestException as e:
             error_msg = f"Network error while downloading model: {e}"
             logging.error(error_msg)
@@ -203,19 +231,18 @@ try:
             raise StartupError(error_msg)
 
     # Загружаем модель с обработкой зависимостей
-    logging.info("Загрузка модели...")
+    logging.info("Loading model...")
     send_status_message("tts-load", "loading", {"message": "Loading TTS model"})
     
     # Устанавливаем необходимые глобальные переменные для torch.package
-    import sys
     sys.modules['scipy.signal'] = scipy.signal
     sys.modules['numpy'] = np
     
     # Загружаем модель
     try:
-        model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
+        model = torch.package.PackageImporter(MODEL_PATH).load_pickle("tts_models", "model")
         model.to(device)
-        logging.info("Модель успешно загружена через torch.package")
+        logging.info("Model successfully loaded via torch.package")
     except Exception as e:
         logging.warning(f"torch.package loading failed: {e}, trying alternative method...")
         # Пробуем альтернативный метод
@@ -223,13 +250,14 @@ try:
         if model is None:
             raise
     
-    logging.info("Модель успешно загружена")
+    logging.info("Model successfully loaded")
     
     send_status_message("tts-ready", "success", {
         "message": "TTS model loaded successfully",
         "speakers": speakers,
         "sample_rate": sample_rate,
-        "device": str(device)
+        "device": str(device),
+        "temp_directory": SOUNDS_DIR
     })
     
 except Exception as e:
@@ -237,7 +265,7 @@ except Exception as e:
     logging.error(error_msg)
     send_error_message(ErrorType.MODEL, error_msg, {
         "stage": "loading",
-        "model_path": model_path,
+        "model_path": MODEL_PATH,
         "error": str(e)
     }, is_fatal=True)
     raise StartupError(error_msg)
@@ -246,7 +274,7 @@ except Exception as e:
 # Функции генерации TTS
 # -----------------------------
 def text_to_speech_file(text, speaker=None):
-    TEMP_DIR_SOUNDS = os.path.join(TEMP_DIR, "sounds")
+    """Генерирует речь из текста и сохраняет во временный файл"""
     
     if speaker == 'random':
         speaker = get_random_speaker()
@@ -255,16 +283,28 @@ def text_to_speech_file(text, speaker=None):
     if speaker not in speakers:
         speaker = DEFAULT_SPEAKER
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=TEMP_DIR_SOUNDS)
-    temp_file_path = temp_file.name
-    temp_file.close()
+    # Создаём временный файл в SOUNDS_DIR
+    try:
+        temp_file = tempfile.NamedTemporaryFile(
+            delete=False, 
+            suffix=".wav", 
+            dir=SOUNDS_DIR
+        )
+        temp_file_path = temp_file.name
+        temp_file.close()
+    except Exception as e:
+        error_msg = f"Failed to create temporary file in {SOUNDS_DIR}: {e}"
+        logging.error(error_msg)
+        raise GenerationError(error_msg)
 
-    logging.info(f"Генерация речи: '{text[:30]}...' с голосом '{speaker}'")
+    logging.info(f"Generating speech: '{text[:30]}...' with voice '{speaker}'")
+    logging.info(f"Output file: {temp_file_path}")
     
     send_status_message("tts-generating", "processing", {
         "message": f"Generating speech for text: {text[:50]}...",
         "speaker": speaker,
-        "text_length": len(text)
+        "text_length": len(text),
+        "output_file": os.path.basename(temp_file_path)
     })
     
     try:
@@ -279,19 +319,30 @@ def text_to_speech_file(text, speaker=None):
         if audio is None or len(audio) == 0:
             raise GenerationError("Generated audio is empty")
         
+        # Сохраняем файл
         sf.write(temp_file_path, audio, sample_rate)
+        
+        # Проверяем, что файл действительно создан
+        if not os.path.exists(temp_file_path):
+            raise GenerationError(f"File was not created: {temp_file_path}")
+        
+        file_size = os.path.getsize(temp_file_path)
+        logging.info(f"File created successfully, size: {file_size} bytes")
 
+        # Очищаем память
         del audio
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
+        # Планируем удаление файла
         threading.Thread(target=delete_file_later, args=(temp_file_path, TEMP_FILE_LIFETIME), daemon=True).start()
         
         send_status_message("tts-generated", "success", {
             "message": "Speech generated successfully",
             "speaker": speaker,
             "file": os.path.basename(temp_file_path),
-            "audio_length": len(audio) if 'audio' in locals() else 0
+            "file_size": file_size
         })
 
         return temp_file_path
@@ -339,19 +390,21 @@ def text_to_speech_file(text, speaker=None):
         raise GenerationError(error_msg)
 
 def delete_file_later(path, delay):
+    """Удаляет файл через заданную задержку"""
     time.sleep(delay)
     try:
         if os.path.isfile(path):
             os.remove(path)
-            logging.info(f"Временный файл удалён: {path}")
+            logging.info(f"Temporary file deleted: {path}")
     except Exception as e:
-        logging.error(f"Ошибка удаления временного файла {path}: {e}")
+        logging.error(f"Error deleting temporary file {path}: {e}")
 
 # -----------------------------
 # Эндпоинты
 # -----------------------------
 @app.route("/api/speak", methods=["POST"])
 def speak():
+    """Генерация речи из текста"""
     try:
         data = request.get_json()
         
@@ -419,8 +472,9 @@ def health():
         "message": "TTS server is running" if model is not None else "Model not loaded",
         "checks": {
             "model_loaded": model is not None,
-            "temp_dir_writable": os.access(TEMP_DIR, os.W_OK),
-            "speakers_available": len(speakers) if model is not None else 0
+            "temp_dir_writable": os.access(SOUNDS_DIR, os.W_OK),
+            "speakers_available": len(speakers) if model is not None else 0,
+            "temp_directory": SOUNDS_DIR
         }
     }
     
@@ -432,6 +486,7 @@ def health():
 
 @app.route("/api/speakers", methods=["GET"])
 def get_speakers():
+    """Возвращает список доступных голосов"""
     return jsonify({"speakers": speakers})
 
 @app.route("/api/status", methods=["GET"])
@@ -449,22 +504,48 @@ def get_status():
             "sample_rate": sample_rate,
             "device": str(device)
         },
+        "temp_directory": {
+            "path": SOUNDS_DIR,
+            "writable": os.access(SOUNDS_DIR, os.W_OK),
+            "exists": os.path.exists(SOUNDS_DIR)
+        },
         "errors": {
             "has_startup_errors": model is None,
-            "has_generation_errors": False  # Можно добавить счетчик
+            "has_generation_errors": False
         }
     })
 
 # -----------------------------
+# Очистка при завершении
+# -----------------------------
+def cleanup_temp_files():
+    """Очищает временные файлы при завершении сервера"""
+    try:
+        if os.path.exists(SOUNDS_DIR):
+            files = os.listdir(SOUNDS_DIR)
+            for file in files:
+                file_path = os.path.join(SOUNDS_DIR, file)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    logging.error(f"Error cleaning up {file_path}: {e}")
+            logging.info(f"Cleaned up {len(files)} temporary files")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}")
+
+import atexit
+atexit.register(cleanup_temp_files)
+
+# -----------------------------
 # Запуск сервера
 # -----------------------------
-# В самом низу файла, где запускается сервер
 if __name__ == "__main__":
     app.config["START_TIME"] = time.time()
     
     # Флаг, ожидающий готовности WebSocket сервера
     websocket_ready = False
-    max_retries = 30  # Максимальное количество попыток
+    max_retries = 30
     retry_count = 0
     
     # Проверяем доступность WebSocket сервера перед запуском
@@ -501,19 +582,14 @@ if __name__ == "__main__":
             time.sleep(1)
     
     if not websocket_ready:
-        error_msg = "WebSocket server not available after maximum retries. TTS server cannot start."
-        logging.error(error_msg)
-        send_error_message(ErrorType.STARTUP, error_msg, {
-            "component": "websocket",
-            "port": 3036
-        }, is_fatal=True)
-        exit(1)
+        logging.warning("WebSocket server not available after maximum retries. Continuing without WebSocket...")
     
     # Сообщение о старте
     send_status_message("tts-server-start", "starting", {
         "message": "TTS Server is starting",
         "port": 5001,
-        "host": "0.0.0.0"
+        "host": "0.0.0.0",
+        "temp_directory": SOUNDS_DIR
     })
     
     if model is None:
@@ -521,26 +597,9 @@ if __name__ == "__main__":
         logging.error(error_msg)
         send_error_message(ErrorType.STARTUP, error_msg, {"fatal": True}, is_fatal=True)
         logging.error("Server startup aborted due to fatal error")
-        exit(1)
+        sys.exit(1)
     
     try:
-        # Запускаем WebSocket сервер в отдельном потоке (если он нужен отдельно)
-        def start_ws_server():
-            try:
-                # Проверяем, нужно ли запускать отдельный WebSocket сервер
-                # или используем существующий
-                if not websocket_ready:
-                    asyncio.run(ws_main())
-                else:
-                    logging.info("Using existing WebSocket server on port 3036")
-            except Exception as e:
-                error_msg = f"WebSocket server error: {e}"
-                logging.error(error_msg)
-                send_error_message(ErrorType.NETWORK, error_msg, {
-                    "component": "websocket",
-                    "error": str(e)
-                }, is_fatal=False)
-        
         # Запускаем WebSocket клиент для связи с основным сервером
         def start_websocket_client():
             """Запускает WebSocket клиент для связи с основным приложением"""
@@ -558,7 +617,8 @@ if __name__ == "__main__":
                             # Отправляем сообщение о готовности
                             await send_ws_message("tts-server-ready", {
                                 "status": "ready",
-                                "message": "TTS Server is fully operational"
+                                "message": "TTS Server is fully operational",
+                                "temp_directory": SOUNDS_DIR
                             })
                         
                         await asyncio.sleep(30)  # Keep connection alive
@@ -568,13 +628,21 @@ if __name__ == "__main__":
                         websocket_connection = None
                         await asyncio.sleep(5)  # Retry after 5 seconds
             
-            loop.run_until_complete(maintain_connection())
+            try:
+                loop.run_until_complete(maintain_connection())
+            except Exception as e:
+                logging.error(f"WebSocket client thread error: {e}")
         
-        # Запускаем WebSocket клиент в отдельном потоке
-        ws_client_thread = threading.Thread(target=start_websocket_client, daemon=True)
-        ws_client_thread.start()
+        # Запускаем WebSocket клиент в отдельном потоке (если websocket_ready)
+        if websocket_ready:
+            ws_client_thread = threading.Thread(target=start_websocket_client, daemon=True)
+            ws_client_thread.start()
+            logging.info("WebSocket client thread started")
+        else:
+            logging.info("WebSocket client disabled (server not available)")
         
-        logging.info("Starting Flask server on http://0.0.0.0:5001")
+        logging.info(f"Starting Flask server on http://0.0.0.0:5001")
+        logging.info(f"Using temporary directory: {SOUNDS_DIR}")
         
         # Сообщение об успешном запуске
         send_status_message("tts-server-ready", "ready", {
@@ -588,11 +656,12 @@ if __name__ == "__main__":
                 "/api/status"
             ],
             "speakers_available": speakers,
-            "model_loaded": True
+            "model_loaded": True,
+            "temp_directory": SOUNDS_DIR
         })
         
         # Запуск Flask
-        app.run(host="0.0.0.0", port=5001, use_reloader=False)
+        app.run(host="0.0.0.0", port=5001, use_reloader=False, threaded=True)
         
     except Exception as e:
         error_msg = f"Failed to start Flask server: {e}"
@@ -601,4 +670,4 @@ if __name__ == "__main__":
             "stage": "flask_startup",
             "error": str(e)
         }, is_fatal=True)
-        raise
+        sys.exit(1)
