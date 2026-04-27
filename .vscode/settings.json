@@ -11,5 +11,8 @@
         "statusBar.debuggingForeground": "#FBFBEA",
         "statusBar.noFolderBackground": "#4D4D0F",
         "statusBar.noFolderForeground": "#FBFBEA"
-    }
+    },
+    "cSpell.words": [
+        "silero"
+    ]
 }

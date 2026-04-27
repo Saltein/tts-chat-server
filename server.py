@@ -246,6 +246,7 @@ except Exception as e:
 # Функции генерации TTS
 # -----------------------------
 def text_to_speech_file(text, speaker=None):
+    TEMP_DIR_SOUNDS = os.path.join(TEMP_DIR, "sounds")
     
     if speaker == 'random':
         speaker = get_random_speaker()
@@ -254,7 +255,7 @@ def text_to_speech_file(text, speaker=None):
     if speaker not in speakers:
         speaker = DEFAULT_SPEAKER
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=TEMP_DIR)
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=TEMP_DIR_SOUNDS)
     temp_file_path = temp_file.name
     temp_file.close()
 
