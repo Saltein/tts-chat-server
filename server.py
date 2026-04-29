@@ -232,13 +232,14 @@ device = torch.device("cpu")
 model = None
 sample_rate = 24000
 speakers = ['aidar', 'baya', 'kseniya', 'xenia', 'eugene', 'random']
+system_speakers = ['aidar', 'baya', 'kseniya', 'xenia', 'eugene']
 DEFAULT_SPEAKER = 'aidar'
 TEMP_FILE_LIFETIME = 60  # Увеличил до 60 секунд
 
 def get_random_speaker():
     """Возвращает случайный голос из доступных"""
     import random
-    return random.choice(speakers)
+    return random.choice(system_speakers)
 
 # Функция для проверки и загрузки модели с локальным кэшем
 def download_model_with_cache(url, local_path):
@@ -487,7 +488,7 @@ def text_to_speech_file(text, speaker=None):
         raise GenerationError(error_msg)
         
     except Exception as e:
-        error_msg = f"Unexpected error during generation: {e}"
+        error_msg = f"Unexpected error during generation: {e} | {speaker}"
         logging.error(error_msg)
         send_error_message(ErrorType.GENERATION, error_msg, {
             "speaker": speaker,
