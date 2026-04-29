@@ -18,25 +18,47 @@ from enum import Enum
 import shutil
 import sys
 import subprocess
+import site
+from pathlib import Path
 
 # Проверка и установка необходимых зависимостей
 def check_and_install_dependencies():
-    """Проверка и установка необходимых зависимостей"""
+    """Проверка и установка необходимых зависимостей в постоянную директорию"""
+    
+    # Получаем постоянную директорию для хранения пакетов
+    if getattr(sys, 'frozen', False):
+        # Запущено как exe - используем AppData
+        base = os.environ.get('APPDATA', os.path.expanduser('~'))
+        packages_dir = os.path.join(base, 'tts_electron', 'packages')
+    else:
+        # Разработка - используем user site-packages
+        packages_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'packages')
+    
+    os.makedirs(packages_dir, exist_ok=True)
+    
+    # Добавляем в PYTHONPATH
+    if packages_dir not in sys.path:
+        sys.path.insert(0, packages_dir)
+    
     required_packages = {
         'scipy': 'scipy',
         'numpy': 'numpy',
         'torchaudio': 'torchaudio'
     }
     
+    # Устанавливаем флаг для pip - target directory
+    pip_args = [sys.executable, "-m", "pip", "install", "--target", packages_dir]
+    
     for package, import_name in required_packages.items():
         try:
             __import__(import_name)
             logging.info(f"✓ {package} found")
         except ImportError:
-            logging.warning(f"{package} not found, installing...")
+            logging.warning(f"{package} not found, installing to {packages_dir}...")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                logging.info(f"✓ {package} installed successfully")
+                cmd = pip_args + [package]
+                subprocess.check_call(cmd)
+                logging.info(f"✓ {package} installed successfully to persistent location")
             except subprocess.CalledProcessError as e:
                 logging.error(f"Failed to install {package}: {e}")
                 raise
@@ -133,26 +155,48 @@ def send_error_message(error_type: ErrorType, error_message: str, error_details=
 # -----------------------------
 # Пути к файлам (исправлено для production)
 # -----------------------------
-def get_base_dir():
-    """Возвращает базовую директорию для ресурсов (модели)"""
+def get_data_dir():
+    """Возвращает постоянную директорию для хранения данных (моделей и т.д.)
+    В production (EXE) – %APPDATA%/tts_electron, иначе – папка со скриптом."""
     if getattr(sys, 'frozen', False):
-        # Запущено как exe – ресурсы лежат в _MEIPASS
-        return sys._MEIPASS
+        # Запущено как exe – используем AppData, а не временную папку _MEIPASS
+        base = os.environ.get('APPDATA', os.path.expanduser('~'))
+        data_dir = os.path.join(base, 'tts_electron')
     else:
-        return os.path.dirname(os.path.abspath(__file__))
+        # Разработка – папка, где лежит скрипт
+        data_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Создаем поддиректории
+    models_dir = os.path.join(data_dir, 'models')
+    packages_dir = os.path.join(data_dir, 'packages')
+    temp_dir = os.path.join(data_dir, 'temp')
+    
+    for dir_path in [models_dir, packages_dir, temp_dir]:
+        os.makedirs(dir_path, exist_ok=True)
+    
+    return data_dir, models_dir, packages_dir, temp_dir
 
-# Папка для модели (только чтение)
-MODEL_DIR = get_base_dir()
-MODEL_PATH = os.path.join(MODEL_DIR, "model5.pt")
+# Получаем пути к директориям
+DATA_DIR, MODELS_DIR, PACKAGES_DIR, PERSISTENT_TEMP_DIR = get_data_dir()
 
-# Папка для временных файлов (системная temp папка)
-TEMP_BASE = tempfile.gettempdir()
-APP_TEMP_DIR = os.path.join(TEMP_BASE, "tts_electron")
-SOUNDS_DIR = os.path.join(APP_TEMP_DIR, "sounds")
+# Путь к модели (в постоянной директории)
+MODEL_PATH = os.path.join(MODELS_DIR, "model5.pt")
 
-# Создаём директории для временных файлов
+# Папка для временных файлов (теперь тоже постоянная, но с автодублированием)
+SOUNDS_DIR = os.path.join(PERSISTENT_TEMP_DIR, "sounds")
+
+# Создаём директории
 os.makedirs(SOUNDS_DIR, exist_ok=True)
 
+# Добавляем packages_dir в sys.path для импорта установленных библиотек
+if PACKAGES_DIR not in sys.path:
+    sys.path.insert(0, PACKAGES_DIR)
+
+logging.info(f"Data directory: {DATA_DIR}")
+logging.info(f"Models directory: {MODELS_DIR}")
+logging.info(f"Packages directory: {PACKAGES_DIR}")
 logging.info(f"Model path: {MODEL_PATH}")
 logging.info(f"Temporary sounds directory: {SOUNDS_DIR}")
 
@@ -162,16 +206,17 @@ logging.info(f"Temporary sounds directory: {SOUNDS_DIR}")
 def load_silero_model_alternative():
     """Альтернативный метод загрузки модели через silero library"""
     try:
-        # Попробуем использовать официальный метод через silero
         import torchaudio
+        # Пробуем импортировать silero из установленных пакетов
+        sys.path.insert(0, PACKAGES_DIR)
         from silero import silero_tts
         
         logging.info("Attempting to load model via silero_tts...")
         model = silero_tts(language='ru', speaker='v3_ru')
         return model, 24000, model.speakers
         
-    except ImportError:
-        logging.warning("silero package not found, using fallback method")
+    except ImportError as e:
+        logging.warning(f"silero package not found: {e}")
         return None, None, None
     except Exception as e:
         logging.warning(f"Alternative loading failed: {e}")
@@ -195,40 +240,66 @@ def get_random_speaker():
     import random
     return random.choice(speakers)
 
+# Функция для проверки и загрузки модели с локальным кэшем
+def download_model_with_cache(url, local_path):
+    """Скачивает модель с кэшированием"""
+    # Проверяем, есть ли уже модель
+    if os.path.isfile(local_path):
+        file_size = os.path.getsize(local_path)
+        logging.info(f"Model found in cache: {local_path} ({file_size} bytes)")
+        
+        # Проверяем, что файл не поврежден (хотя бы не нулевой размер)
+        if file_size > 1000000:  # Больше 1MB
+            return True
+        else:
+            logging.warning(f"Cached model file is too small ({file_size} bytes), redownloading...")
+            os.remove(local_path)
+    
+    # Скачиваем модель
+    logging.info(f"Downloading model from {url} to {local_path}")
+    try:
+        # Используем stream=True для больших файлов
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(local_path, 'wb') as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    progress = (downloaded / total_size) * 100
+                    if int(progress) % 10 == 0:  # Логируем каждые 10%
+                        logging.info(f"Download progress: {progress:.1f}%")
+        
+        file_size = os.path.getsize(local_path)
+        logging.info(f"Model downloaded successfully: {file_size} bytes")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error while downloading model: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"Failed to download model: {e}")
+        return False
+
 # Пытаемся загрузить модель
 try:
-    # Проверяем наличие модели
+    # Проверяем наличие модели, если нет - скачиваем
     if not os.path.isfile(MODEL_PATH):
         logging.warning(f"Model not found at {MODEL_PATH}, attempting to download...")
         send_status_message("tts-download", "downloading", {"message": "Downloading TTS model"})
         
-        try:
-            url = "https://models.silero.ai/models/tts/ru/v5_ru.pt"
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # В production модель скачать не сможем (read-only), но попробуем
-            # Если не получится, выбросим ошибку
-            try:
-                with open(MODEL_PATH, 'wb') as f:
-                    f.write(response.content)
-                logging.info("Model downloaded successfully")
-                send_status_message("tts-download", "success", {"message": "TTS model downloaded successfully"})
-            except (PermissionError, OSError):
-                error_msg = f"Cannot write model to {MODEL_PATH} (read-only filesystem)"
-                logging.error(error_msg)
-                raise StartupError(error_msg)
-                
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Network error while downloading model: {e}"
+        url = "https://models.silero.ai/models/tts/ru/v5_ru.pt"
+        if not download_model_with_cache(url, MODEL_PATH):
+            error_msg = "Failed to download model"
             logging.error(error_msg)
-            send_error_message(ErrorType.NETWORK, error_msg, {"url": url, "error": str(e)}, is_fatal=True)
+            send_error_message(ErrorType.NETWORK, error_msg, {"url": url}, is_fatal=True)
             raise StartupError(error_msg)
-        except Exception as e:
-            error_msg = f"Failed to download model: {e}"
-            logging.error(error_msg)
-            send_error_message(ErrorType.STARTUP, error_msg, {"stage": "download", "error": str(e)}, is_fatal=True)
-            raise StartupError(error_msg)
+        
+        send_status_message("tts-download", "success", {"message": "TTS model downloaded successfully"})
 
     # Загружаем модель с обработкой зависимостей
     logging.info("Loading model...")
@@ -237,6 +308,10 @@ try:
     # Устанавливаем необходимые глобальные переменные для torch.package
     sys.modules['scipy.signal'] = scipy.signal
     sys.modules['numpy'] = np
+    
+    # Добавляем packages_dir в sys.path для torch.package
+    original_path = sys.path.copy()
+    sys.path.insert(0, PACKAGES_DIR)
     
     # Загружаем модель
     try:
@@ -249,6 +324,9 @@ try:
         model, sample_rate, speakers = load_silero_model_alternative()
         if model is None:
             raise
+    finally:
+        # Восстанавливаем sys.path
+        sys.path = original_path
     
     logging.info("Model successfully loaded")
     
@@ -257,6 +335,9 @@ try:
         "speakers": speakers,
         "sample_rate": sample_rate,
         "device": str(device),
+        "data_directory": DATA_DIR,
+        "models_directory": MODELS_DIR,
+        "packages_directory": PACKAGES_DIR,
         "temp_directory": SOUNDS_DIR
     })
     
@@ -269,6 +350,33 @@ except Exception as e:
         "error": str(e)
     }, is_fatal=True)
     raise StartupError(error_msg)
+
+# -----------------------------
+# Очистка старых временных файлов при запуске
+# -----------------------------
+def cleanup_old_temp_files():
+    """Очищает временные файлы старше 20 секунд """
+    try:
+        current_time = time.time()
+        deleted_count = 0
+        
+        if os.path.exists(SOUNDS_DIR):
+            for filename in os.listdir(SOUNDS_DIR):
+                file_path = os.path.join(SOUNDS_DIR, filename)
+                if os.path.isfile(file_path):
+                    file_age = current_time - os.path.getmtime(file_path)
+                    if file_age > 20: # 20 секунд
+                        os.remove(file_path)
+                        deleted_count += 1
+                        
+        if deleted_count > 0:
+            logging.info(f"Cleaned up {deleted_count} old temporary files")
+            
+    except Exception as e:
+        logging.error(f"Error cleaning old temp files: {e}")
+
+# Запускаем очистку при старте
+cleanup_old_temp_files()
 
 # -----------------------------
 # Функции генерации TTS
@@ -400,7 +508,7 @@ def delete_file_later(path, delay):
         logging.error(f"Error deleting temporary file {path}: {e}")
 
 # -----------------------------
-# Эндпоинты
+# Эндпоинты (без изменений)
 # -----------------------------
 @app.route("/api/speak", methods=["POST"])
 def speak():
@@ -474,6 +582,9 @@ def health():
             "model_loaded": model is not None,
             "temp_dir_writable": os.access(SOUNDS_DIR, os.W_OK),
             "speakers_available": len(speakers) if model is not None else 0,
+            "data_directory": DATA_DIR,
+            "models_directory": MODELS_DIR,
+            "packages_directory": PACKAGES_DIR,
             "temp_directory": SOUNDS_DIR
         }
     }
@@ -504,10 +615,15 @@ def get_status():
             "sample_rate": sample_rate,
             "device": str(device)
         },
-        "temp_directory": {
-            "path": SOUNDS_DIR,
-            "writable": os.access(SOUNDS_DIR, os.W_OK),
-            "exists": os.path.exists(SOUNDS_DIR)
+        "directories": {
+            "data": DATA_DIR,
+            "models": MODELS_DIR,
+            "packages": PACKAGES_DIR,
+            "temp": SOUNDS_DIR
+        },
+        "storage": {
+            "model_size_mb": os.path.getsize(MODEL_PATH) / 1024 / 1024 if os.path.exists(MODEL_PATH) else 0,
+            "packages_size_mb": sum(os.path.getsize(os.path.join(PACKAGES_DIR, f)) for f in os.listdir(PACKAGES_DIR) if os.path.isfile(os.path.join(PACKAGES_DIR, f))) / 1024 / 1024 if os.path.exists(PACKAGES_DIR) else 0
         },
         "errors": {
             "has_startup_errors": model is None,
@@ -589,6 +705,9 @@ if __name__ == "__main__":
         "message": "TTS Server is starting",
         "port": 5001,
         "host": "0.0.0.0",
+        "data_directory": DATA_DIR,
+        "models_directory": MODELS_DIR,
+        "packages_directory": PACKAGES_DIR,
         "temp_directory": SOUNDS_DIR
     })
     
@@ -618,6 +737,8 @@ if __name__ == "__main__":
                             await send_ws_message("tts-server-ready", {
                                 "status": "ready",
                                 "message": "TTS Server is fully operational",
+                                "data_directory": DATA_DIR,
+                                "models_directory": MODELS_DIR,
                                 "temp_directory": SOUNDS_DIR
                             })
                         
@@ -642,7 +763,11 @@ if __name__ == "__main__":
             logging.info("WebSocket client disabled (server not available)")
         
         logging.info(f"Starting Flask server on http://0.0.0.0:5001")
-        logging.info(f"Using temporary directory: {SOUNDS_DIR}")
+        logging.info(f"Using directories:")
+        logging.info(f"  - Data: {DATA_DIR}")
+        logging.info(f"  - Models: {MODELS_DIR}")
+        logging.info(f"  - Packages: {PACKAGES_DIR}")
+        logging.info(f"  - Temp: {SOUNDS_DIR}")
         
         # Сообщение об успешном запуске
         send_status_message("tts-server-ready", "ready", {
@@ -657,7 +782,12 @@ if __name__ == "__main__":
             ],
             "speakers_available": speakers,
             "model_loaded": True,
-            "temp_directory": SOUNDS_DIR
+            "directories": {
+                "data": DATA_DIR,
+                "models": MODELS_DIR,
+                "packages": PACKAGES_DIR,
+                "temp": SOUNDS_DIR
+            }
         })
         
         # Запуск Flask
