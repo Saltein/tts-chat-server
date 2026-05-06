@@ -1,8 +1,31 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+import sys
+import os
+
+# ------------------------------------------------------------
+# Поддержка кириллицы в путях на Windows
+# ------------------------------------------------------------
+if sys.platform == 'win32':
+    # Принудительно используем UTF-8 для файловой системы
+    if hasattr(sys, 'getfilesystemencoding'):
+        original_getfsencoding = sys.getfilesystemencoding
+        sys.getfilesystemencoding = lambda: 'utf-8'
+    
+    # Устанавливаем переменные окружения для UTF-8
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['PYTHONUTF8'] = '1'  # Включает режим UTF-8 для Windows (Python 3.7+)
+    
+    # Для Python 3.7+ это наиболее чистый способ
+    # Дополнительно можно установить кодировку для stdout/stderr
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 import torch
 import uuid
-import os
 import logging
 import soundfile as sf
 import requests
@@ -16,12 +39,15 @@ import json
 from ws_lobby import main as ws_main
 from enum import Enum
 import shutil
-import sys
 import subprocess
 import site
 from pathlib import Path
 
+import locale   # не используется, но оставлено как было
+
+# ------------------------------------------------------------
 # Проверка и установка необходимых зависимостей
+# ------------------------------------------------------------
 def check_and_install_dependencies():
     """Проверка и установка необходимых зависимостей в постоянную директорию"""
     
@@ -34,6 +60,8 @@ def check_and_install_dependencies():
         # Разработка - используем user site-packages
         packages_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'packages')
     
+    # Нормализуем путь (преобразуем в абсолютный и корректный для ОС)
+    packages_dir = os.path.normpath(packages_dir)
     os.makedirs(packages_dir, exist_ok=True)
     
     # Добавляем в PYTHONPATH
@@ -47,7 +75,13 @@ def check_and_install_dependencies():
     }
     
     # Устанавливаем флаг для pip - target directory
+    # Используем кодировку utf-8 для передачи аргументов
     pip_args = [sys.executable, "-m", "pip", "install", "--target", packages_dir]
+    
+    # Устанавливаем переменные окружения для поддержки UTF-8 в subprocess
+    env = os.environ.copy()
+    env['PYTHONUTF8'] = '1'
+    env['PYTHONIOENCODING'] = 'utf-8'
     
     for package, import_name in required_packages.items():
         try:
@@ -57,7 +91,8 @@ def check_and_install_dependencies():
             logging.warning(f"{package} not found, installing to {packages_dir}...")
             try:
                 cmd = pip_args + [package]
-                subprocess.check_call(cmd)
+                # Явно указываем кодировку utf-8 для вывода/ввода
+                subprocess.check_call(cmd, env=env, encoding='utf-8')
                 logging.info(f"✓ {package} installed successfully to persistent location")
             except subprocess.CalledProcessError as e:
                 logging.error(f"Failed to install {package}: {e}")
@@ -153,11 +188,12 @@ def send_error_message(error_type: ErrorType, error_message: str, error_details=
     logging.error(f"[{error_type.value}] {error_message}")
 
 # -----------------------------
-# Пути к файлам (исправлено для production)
+# Пути к файлам (исправлено для production и кириллицы)
 # -----------------------------
 def get_data_dir():
     """Возвращает постоянную директорию для хранения данных (моделей и т.д.)
-    В production (EXE) – %APPDATA%/tts_electron, иначе – папка со скриптом."""
+    В production (EXE) – %APPDATA%/tts_electron, иначе – папка со скриптом.
+    Все пути нормализуются для корректной работы с Unicode."""
     if getattr(sys, 'frozen', False):
         # Запущено как exe – используем AppData, а не временную папку _MEIPASS
         base = os.environ.get('APPDATA', os.path.expanduser('~'))
@@ -166,6 +202,8 @@ def get_data_dir():
         # Разработка – папка, где лежит скрипт
         data_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # Нормализуем путь (преобразуем в абсолютный и корректный для ОС)
+    data_dir = os.path.normpath(data_dir)
     os.makedirs(data_dir, exist_ok=True)
     
     # Создаем поддиректории
@@ -243,7 +281,10 @@ def get_random_speaker():
 
 # Функция для проверки и загрузки модели с локальным кэшем
 def download_model_with_cache(url, local_path):
-    """Скачивает модель с кэшированием"""
+    """Скачивает модель с кэшированием, корректно обрабатывая Unicode-пути"""
+    # Нормализуем путь
+    local_path = os.path.normpath(local_path)
+    
     # Проверяем, есть ли уже модель
     if os.path.isfile(local_path):
         file_size = os.path.getsize(local_path)
@@ -267,12 +308,18 @@ def download_model_with_cache(url, local_path):
         
         with open(local_path, 'wb') as f:
             downloaded = 0
+            last_logged = -1  # важно!
+
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
                 downloaded += len(chunk)
+
                 if total_size > 0:
                     progress = (downloaded / total_size) * 100
-                    if int(progress) % 10 == 0:  # Логируем каждые 10%
+                    current_step = int(progress) // 10
+
+                    if current_step != last_logged:
+                        last_logged = current_step
                         logging.info(f"Download progress: {progress:.1f}%")
         
         file_size = os.path.getsize(local_path)
@@ -314,9 +361,10 @@ try:
     original_path = sys.path.copy()
     sys.path.insert(0, PACKAGES_DIR)
     
-    # Загружаем модель
+    # Загружаем модель, передавая абсолютный нормализованный путь
+    model_abs_path = os.path.abspath(MODEL_PATH)
     try:
-        model = torch.package.PackageImporter(MODEL_PATH).load_pickle("tts_models", "model")
+        model = torch.package.PackageImporter(model_abs_path).load_pickle("tts_models", "model")
         model.to(device)
         logging.info("Model successfully loaded via torch.package")
     except Exception as e:
@@ -356,7 +404,7 @@ except Exception as e:
 # Очистка старых временных файлов при запуске
 # -----------------------------
 def cleanup_old_temp_files():
-    """Очищает временные файлы старше 20 секунд """
+    """Очищает временные файлы старше 20 секунд"""
     try:
         current_time = time.time()
         deleted_count = 0
@@ -392,7 +440,7 @@ def text_to_speech_file(text, speaker=None):
     if speaker not in speakers:
         speaker = DEFAULT_SPEAKER
 
-    # Создаём временный файл в SOUNDS_DIR
+    # Создаём временный файл в SOUNDS_DIR (путь с поддержкой Unicode)
     try:
         temp_file = tempfile.NamedTemporaryFile(
             delete=False, 
